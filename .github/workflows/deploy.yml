@@ -1,0 +1,178 @@
+name: 🚀 Production Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ─────────────────────────────────────────
+      # 1. Code checkout
+      # ─────────────────────────────────────────
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────
+      # 2. Node.js setup (cache for speed)
+      # ─────────────────────────────────────────
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      # ─────────────────────────────────────────
+      # 3. Install & Build (TypeScript check)
+      # ─────────────────────────────────────────
+      - name: 📦 Install & Build
+        run: |
+          npm ci
+          npm run build
+
+      # ─────────────────────────────────────────
+      # 4. Docker Hub login
+      # ─────────────────────────────────────────
+      - name: 🐳 Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # ─────────────────────────────────────────
+      # 5. Build & Push Docker image
+      # ─────────────────────────────────────────
+      - name: 🔨 Build & Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/sarpongoy-backend:latest
+            ${{ secrets.DOCKER_USERNAME }}/sarpongoy-backend:${{ github.sha }}
+
+      # ─────────────────────────────────────────
+      # 6. Deploy to VPS via SSH (password auth)
+      # ─────────────────────────────────────────
+      - name: 🖥️ Deploy to VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            echo "=============================="
+            echo "🚀 Deploy শুরু হচ্ছে..."
+            echo "=============================="
+
+            # App folder তৈরি
+            mkdir -p /app
+
+            # ─────────────────────────
+            # .env ফাইল তৈরি
+            # ─────────────────────────
+            cat > /app/.env << 'ENVEOF'
+            NODE_ENV=production
+            PORT=5000
+            MONGO_URI=${{ secrets.MONGO_URI }}
+            BCRYPT_SALT_ROUNDS=${{ secrets.BCRYPT_SALT_ROUNDS }}
+            ACCESS_TOKEN_SECRET=${{ secrets.ACCESS_TOKEN_SECRET }}
+            ACCESS_TOKEN_EXPIRES=${{ secrets.ACCESS_TOKEN_EXPIRES }}
+            REFRESH_TOKEN_SECRET=${{ secrets.REFRESH_TOKEN_SECRET }}
+            REFRESH_TOKEN_EXPIRES=${{ secrets.REFRESH_TOKEN_EXPIRES }}
+            CLOUDINARY_CLOUD_NAME=${{ secrets.CLOUDINARY_CLOUD_NAME }}
+            CLOUDINARY_API_KEY=${{ secrets.CLOUDINARY_API_KEY }}
+            CLOUDINARY_API_SECRET=${{ secrets.CLOUDINARY_API_SECRET }}
+            EMAIL_EXPIRES=${{ secrets.EMAIL_EXPIRES }}
+            EMAIL_HOST=${{ secrets.EMAIL_HOST }}
+            EMAIL_PORT=${{ secrets.EMAIL_PORT }}
+            EMAIL_ADDRESS=${{ secrets.EMAIL_ADDRESS }}
+            EMAIL_PASS=${{ secrets.EMAIL_PASS }}
+            EMAIL_FROM=${{ secrets.EMAIL_FROM }}
+            EMAIL_TO=${{ secrets.EMAIL_TO }}
+            ADMIN_EMAIL=${{ secrets.ADMIN_EMAIL }}
+            STRIPE_PUBLISHABLE_KEY=${{ secrets.STRIPE_PUBLISHABLE_KEY }}
+            STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}
+            STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}
+            STRIPE_PLATFORM_ACCOUNT_ID=${{ secrets.STRIPE_PLATFORM_ACCOUNT_ID }}
+            GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+            GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+            FRONTEND_URL=${{ secrets.FRONTEND_URL }}
+            BACKEND_URL=${{ secrets.BACKEND_URL }}
+            DOCKER_USERNAME=${{ secrets.DOCKER_USERNAME }}
+            ENVEOF
+
+            # ─────────────────────────
+            # docker-compose.yml তৈরি
+            # ─────────────────────────
+            cat > /app/docker-compose.yml << 'COMPOSEEOF'
+            services:
+              app:
+                image: ${{ secrets.DOCKER_USERNAME }}/sarpongoy-backend:latest
+                container_name: sarpongoy_app
+                restart: unless-stopped
+                ports:
+                  - "5000:5000"
+                env_file:
+                  - .env
+                networks:
+                  - backend_network
+                healthcheck:
+                  test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5000"]
+                  interval: 30s
+                  timeout: 10s
+                  retries: 3
+                  start_period: 40s
+
+            networks:
+              backend_network:
+                driver: bridge
+            COMPOSEEOF
+
+            # ─────────────────────────
+            # PM2 web-backend বন্ধ করো
+            # (port 5000 conflict avoid করতে)
+            # ─────────────────────────
+            echo "⏹️ PM2 web-backend বন্ধ করছি..."
+            pm2 stop web-backend 2>/dev/null || true
+            pm2 delete web-backend 2>/dev/null || true
+
+            # ─────────────────────────
+            # Latest image pull
+            # ─────────────────────────
+            echo "📥 Latest image pull করছি..."
+            docker pull ${{ secrets.DOCKER_USERNAME }}/sarpongoy-backend:latest
+
+            # ─────────────────────────
+            # পুরনো container বন্ধ
+            # ─────────────────────────
+            echo "⏹️ পুরনো containers বন্ধ করছি..."
+            cd /app && docker compose down
+
+            # ─────────────────────────
+            # নতুন container চালু
+            # ─────────────────────────
+            echo "▶️ নতুন container চালু করছি..."
+            cd /app && docker compose up -d
+
+            # ─────────────────────────
+            # পুরনো image পরিষ্কার
+            # ─────────────────────────
+            echo "🧹 পুরনো images মুছছি..."
+            docker image prune -f
+
+            # ─────────────────────────
+            # Health check
+            # ─────────────────────────
+            echo "🔍 Health check..."
+            sleep 10
+            docker compose -f /app/docker-compose.yml ps
+
+            echo "=============================="
+            echo "✅ Deploy সফল হয়েছে!"
+            echo "=============================="
